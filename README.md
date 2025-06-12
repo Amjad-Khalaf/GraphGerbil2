@@ -9,6 +9,4 @@ Ploidy-aware genome phasing by graph partitioning, implemented in golang
 - [ ] Test on tetraploid microsporidians (farm)
 - [ ] Test on tetraploid worm (farm)
 - [ ] Test on octoploid plant (farm)
-- [ ] Refactor functions to find BEST partitioning threshold automatically
-- [ ] Refactor functions to return the partitioned fastas as well (for the best bin)
-- [ ] Refactor functions to return a consensus sequence (despite overlaps ;) )
+- [ ] Refactor to have "Fasta printing" mode, and "testing" mode... I don't want to set hard limits on what I think the best assembly is, different things will have different ideal thresholds!
