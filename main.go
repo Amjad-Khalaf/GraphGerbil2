@@ -2,38 +2,52 @@ package main
 
 import (
 	"GraphGerbil2/BUSCO"
-	"GraphGerbil2/FASTK"
 	"GraphGerbil2/Fai"
 	"GraphGerbil2/Graph"
-	"GraphGerbil2/Kmers"
 	"GraphGerbil2/Sequence"
+	"GraphGerbil2/Syncmers"
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
-func BUSCOMode(FaiPath string, BUSCOFullTable string, NumberOfBins int, ThresholdsToTest []float32) {
 
-	// === STEP 1: Read BUSCO Full Table ===
-	SequenceMap, SequenceHashMap, _, BUSCOMap := BUSCO.ReadBUSCOFullTable(BUSCOFullTable)
-	TotalBUSCONum := len(BUSCOMap)
+func BUSCOMode(FaiPath string, BUSCOFullTable string, NumberOfBins int, Thresholds []float32, NumOfWorkers int) {
 
-	// === STEP 2: Read sequence lengths ===
-	SequenceLengthMap := Fai.ReadFaiFile(FaiPath, SequenceHashMap)
+	start := time.Now()
+	SequenceLengthMap, SequenceHashMap := Fai.ReadFaiFile(FaiPath)
+	elapsed := time.Since(start)
+	fmt.Printf("Time elapsed to process Samtools fai file: %s\n", elapsed)
+	
+	start = time.Now()
+	BUSCOSequenceMap, _, BUSCOMap, TotalBUSCONum := BUSCO.ReadBUSCOFullTable(BUSCOFullTable, SequenceHashMap)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to process BUSCO files: %s\n", elapsed)
 
-	// === STEP 3: Construct graph from BUSCOs ===
-	BufferGraph, graph := Graph.GenerateGraph(BUSCOMap)
+	fmt.Printf("%d sequences in total, %d of those have BUSCOs on them \n", len(SequenceLengthMap), len(BUSCOSequenceMap))
+
+	start = time.Now()
+	BufferGraph, graph := Graph.GenerateGraphInParallel(BUSCOMap, NumOfWorkers)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to build graph: %s\n", elapsed)
+
+	graphpartitiontimestart := time.Now()
 	SortedSequences := Graph.SortAllSequencesbyConnectedness(graph)
 
-	fmt.Println("Threshold\tBin\tSeqs\tSpan\tS(%)\tD(%)")
+	fmt.Println("---------------------------------------------------")
+	fmt.Printf("%-10s %-5s %-5s %-10s %-6s %-6s %-6s\n", "Threshold", "Bin", "Seqs", "Span", "C(%)", "S(%)", "D(%)")
+	fmt.Println("---------------------------------------------------")
 
-	for _, Threshold := range ThresholdsToTest {
-		// === STEP 4: Bin sequences using graph ===
+
+	for _, Threshold := range Thresholds {
 		Bins, UnassignedSequences := Graph.PartitionGraph(
 			BufferGraph,
 			graph,
-			SequenceMap,
+			BUSCOSequenceMap,
 			SortedSequences,
 			NumberOfBins,
 			Threshold,
@@ -41,94 +55,111 @@ func BUSCOMode(FaiPath string, BUSCOFullTable string, NumberOfBins int, Threshol
 			SequenceLengthMap,
 		)
 
-		// === STEP 5: Score and report each bin using BUSCOs ===
 		for i, Bin := range Bins {
-			fmt.Printf("%.1f\t%d\t%d\t%d\t%.2f\t%.2f\n",
+			fmt.Printf("%-10.1f %-5d %-5d %-10d %-6.2f %-6.2f %-6.2f\n",
 				Threshold,
 				i+1,
 				Bin.NumofSequences,
 				Bin.AssemblySpan,
+				(Bin.Score.ActualSingleCopyPercentage + Bin.Score.ActualDuplicatePercentage),
 				Bin.Score.ActualSingleCopyPercentage,
 				Bin.Score.ActualDuplicatePercentage,
 			)
 		}
 
-		// === STEP 6: Score unassigned sequences ===
 		var UnassignedSequencesBUSCOs []uint64
 		for _, Sequence := range UnassignedSequences {
-			UnassignedSequencesBUSCOs = append(UnassignedSequencesBUSCOs, SequenceMap[Sequence].Markers...)
+			UnassignedSequencesBUSCOs = append(UnassignedSequencesBUSCOs, BUSCOSequenceMap[Sequence].Markers...)
 		}
 		UnassignedSequencesScore := Sequence.ScoreMarkers(UnassignedSequencesBUSCOs, TotalBUSCONum)
 		UnassignedSequencesSpan := Fai.MeasureAssemblySpan(UnassignedSequences, SequenceLengthMap)
 
-		fmt.Printf("Unassigned\t%d\t%d\t%.2f\t%.2f\n",
+		fmt.Printf("%-10s %-5s %-5d %-10d %-6.2f %-6.2f %-6.2f\n",
+			"Unassigned",
+			"",
 			len(UnassignedSequences),
 			UnassignedSequencesSpan,
+			(UnassignedSequencesScore.ActualSingleCopyPercentage + UnassignedSequencesScore.ActualDuplicatePercentage),
 			UnassignedSequencesScore.ActualSingleCopyPercentage,
 			UnassignedSequencesScore.ActualDuplicatePercentage,
 		)
 		fmt.Println("---------------------------------------------------")
 	}
+	graphpartitionelapsed := time.Since(graphpartitiontimestart)
+	fmt.Printf("Time elapsed to partition graph and run sub-processes: %s\t", graphpartitionelapsed)
 }
 
-func KmerMode(FastaFilePath string, TabexFilePath string, K int, FaiPath string, BUSCOFullTable string, NumberOfBins int, ThresholdsToTest []float32, MinKCount int, MaxKCount int) {
+func SyncmerMode(FastaFilePath string, K int, S int, T int, FaiPath string, BUSCOFullTable string, NumberOfBins int, Thresholds []float32, MinKCount int, MaxKCount int, cores int, NumToSubsample int) {
 
-	// === STEP 1: Read BUSCO Full Table ===
-	BUSCOstart := time.Now()
-	BUSCOSequenceMap, SequenceHashMap, _, BUSCOMap := BUSCO.ReadBUSCOFullTable(BUSCOFullTable)
-	TotalBUSCONum := len(BUSCOMap)
-	elapsed := time.Since(BUSCOstart)
+	start := time.Now()
+	SequenceLengthMap, SequenceHashMap := Fai.ReadFaiFile(FaiPath)
+	elapsed := time.Since(start)
+	fmt.Printf("Time elapsed to process Samtools fai file: %s\n", elapsed)
+
+	start = time.Now()
+	BUSCOSequenceMap, _, _, TotalBUSCONum := BUSCO.ReadBUSCOFullTable(BUSCOFullTable, SequenceHashMap)
+	elapsed = time.Since(start)
 	fmt.Printf("Time elapsed to process BUSCO files: %s\n", elapsed)
 
-	// === STEP 2: Read sequence lengths ===
-	faistart := time.Now()
-	SequenceLengthMap := Fai.ReadFaiFile(FaiPath, SequenceHashMap)
-	faielapsed := time.Since(faistart)
-	fmt.Printf("Time elapsed to process Samtools fai file: %s\n", faielapsed)
+	fmt.Printf("%d sequences in total, %d of those have BUSCOs on them \n", len(SequenceLengthMap), len(BUSCOSequenceMap))
 
-	// === STEP 3: Build Kmer Map ===
-	Tabexstart := time.Now()
-	TabexMap := FASTK.ReadTabexFile(TabexFilePath, K, MinKCount, MaxKCount)
-	Tabexelapsed := time.Since(Tabexstart)
-	fmt.Printf("Time elapsed to process Tabex file: %s\n", Tabexelapsed)
+	start = time.Now()
+	SyncmerList := Syncmers.SyncmeriseWithWorkerPool(FastaFilePath, K, S, T, SequenceHashMap, cores)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to generate Syncmers for the whole genome: %s\n", elapsed)
 
-	LocateKmersstart := time.Now()
-	FilteredKmerList := Kmers.KmeriseWithWorkerPool(FastaFilePath, K, TabexMap, SequenceHashMap, 8)
-	Locatekmerselapsed := time.Since(LocateKmersstart)
-	fmt.Printf("Time elapsed to locate kmers in genome: %s\n", Locatekmerselapsed)
+	start = time.Now()
+	SyncmerMap := Syncmers.ConvertSyncmerListToKSyncmerMapIgnoringInternalDuplication(SyncmerList)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to generate SyncmerMap from SyncmerList: %s\n", elapsed)
 
-	KmerMapsGenerationStart := time.Now()
-	KmerMap := Kmers.ConvertKmerListToKmerMap(FilteredKmerList)
-	TotalKmerCount := len(KmerMap)
-	KmerSequenceMap := Kmers.GenerateSequenceMap(KmerMap)
-	KmerMapsGenerationelapsed := time.Since(KmerMapsGenerationStart)
-	fmt.Printf("Time elapsed to generate KmerMap and KmerSequenceMap: %s\n", KmerMapsGenerationelapsed)
+	start = time.Now()
+	FilteredSyncmerMap := Syncmers.FilterSyncmerMap(SyncmerMap, MinKCount, MaxKCount)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to filter syncmers: %s\n", elapsed)
 
-	// === STEP 4: Construct graph from k-mers ===
-	graphtimestart := time.Now()
-	BufferGraph, graph := Graph.GenerateGraphInParallel(KmerMap, 8)
-	graphelapsed := time.Since(graphtimestart)
-	fmt.Printf("Time elapsed to build graph from kmers: %s\n", graphelapsed)
+	TotalSyncmerCount := len(FilteredSyncmerMap)
+
+	start = time.Now()
+	SyncmerSequenceMap := Syncmers.GenerateSequenceMap(FilteredSyncmerMap)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to generate SyncmerSequenceMap from Filtered SyncmerMap: %s\n", elapsed)
+	fmt.Printf("%d sequences in total are represented by %d valid syncmers \n", len(SyncmerSequenceMap), TotalSyncmerCount)
+
+	if NumToSubsample != -1 {
+		start = time.Now()
+		SampledSyncmerMap := Syncmers.SampleSyncmers(FilteredSyncmerMap, NumToSubsample)
+		elapsed = time.Since(start)
+		fmt.Printf("Time elapsed to sample %d syncmers: %s\n", NumToSubsample, elapsed)
+		SyncmerSequenceMap = Syncmers.GenerateSequenceMap(SampledSyncmerMap)
+		fmt.Printf("%d sequences in total are represented by sampled syncmers \n", len(SyncmerSequenceMap))
+		FilteredSyncmerMap = SampledSyncmerMap
+	}
+
+	start = time.Now()
+	BufferGraph, graph := Graph.GenerateGraphInParallel(FilteredSyncmerMap, cores)
+	elapsed = time.Since(start)
+	fmt.Printf("Time elapsed to build graph: %s\n", elapsed)
 
 	graphpartitiontimestart := time.Now()
 	SortedSequences := Graph.SortAllSequencesbyConnectedness(graph)
 
-	fmt.Println("Threshold\tBin\tSeqs\tSpan\tS(%)\tD(%)")
+	fmt.Println("---------------------------------------------------")
+	fmt.Printf("%-10s %-5s %-5s %-10s %-6s %-6s %-6s\n", "Threshold", "Bin", "Seqs", "Span", "C(%)", "S(%)", "D(%)")
+	fmt.Println("---------------------------------------------------")
 
-	for _, Threshold := range ThresholdsToTest {
-		// === STEP 5: Bin sequences using graph ===
-		Bins, UnassignedSequences := Graph.PartitionGraph(
+	for _, Threshold := range Thresholds {
+		Bins, UnassignedSequences := Graph.PartitionGraphInParallel(
 			BufferGraph,
 			graph,
-			KmerSequenceMap,
+			SyncmerSequenceMap,
 			SortedSequences,
 			NumberOfBins,
 			Threshold,
-			TotalKmerCount,
+			TotalSyncmerCount,
 			SequenceLengthMap,
 		)
 
-		// === STEP 6: Score and report each bin using BUSCOs ===
 		for i, Bin := range Bins {
 			var BinBUSCOs []uint64
 			for _, Sequence := range Bin.Sequences {
@@ -137,17 +168,17 @@ func KmerMode(FastaFilePath string, TabexFilePath string, K int, FaiPath string,
 
 			BinScore := Sequence.ScoreMarkers(BinBUSCOs, TotalBUSCONum)
 
-			fmt.Printf("%.1f\t%d\t%d\t%d\t%.2f\t%.2f\n",
+			fmt.Printf("%-10.1f %-5d %-5d %-10d %-6.2f %-6.2f %-6.2f\n",
 				Threshold,
 				i+1,
 				Bin.NumofSequences,
 				Bin.AssemblySpan,
+				(BinScore.ActualSingleCopyPercentage + BinScore.ActualDuplicatePercentage),
 				BinScore.ActualSingleCopyPercentage,
 				BinScore.ActualDuplicatePercentage,
 			)
 		}
 
-		// === STEP 7: Score unassigned sequences ===
 		var UnassignedSequencesBUSCOs []uint64
 		for _, Sequence := range UnassignedSequences {
 			UnassignedSequencesBUSCOs = append(UnassignedSequencesBUSCOs, BUSCOSequenceMap[Sequence].Markers...)
@@ -155,9 +186,12 @@ func KmerMode(FastaFilePath string, TabexFilePath string, K int, FaiPath string,
 		UnassignedSequencesScore := Sequence.ScoreMarkers(UnassignedSequencesBUSCOs, TotalBUSCONum)
 		UnassignedSequencesSpan := Fai.MeasureAssemblySpan(UnassignedSequences, SequenceLengthMap)
 
-		fmt.Printf("Unassigned\t%d\t%d\t%.2f\t%.2f\n",
+		fmt.Printf("%-10s %-5s %-5d %-10d %-6.2f %-6.2f %-6.2f\n",
+			"Unassigned",
+			"",
 			len(UnassignedSequences),
 			UnassignedSequencesSpan,
+			(UnassignedSequencesScore.ActualSingleCopyPercentage + UnassignedSequencesScore.ActualDuplicatePercentage),
 			UnassignedSequencesScore.ActualSingleCopyPercentage,
 			UnassignedSequencesScore.ActualDuplicatePercentage,
 		)
@@ -168,36 +202,101 @@ func KmerMode(FastaFilePath string, TabexFilePath string, K int, FaiPath string,
 }
 
 func main() {
-
-	FastaPath := flag.String("Fasta", "", "Unphased fasta file")
-	TabexPath := flag.String("Tabex", "", "Tabex -A -t output for the unphased fasta")
+	mode := flag.String("Mode", "", "Phasing mode to use: 'syncmers' or 'busco'")
+	FastaPath := flag.String("Fasta", "", "(non-BUSCO modes only) Unphased fasta file")
 	FaiPath := flag.String("Fai", "", "Samtools index .fai file for the unphased fasta")
-	K := flag.Int("K", 0, "Kmer length used when running FastK")
-	BinCount := flag.Int("Ploidy", 0, "Ploidy, or number of bins you want to partition your genome into")
-	Min := flag.Int("MinKCount", 2, "Minimum genome-wide count of kmers used in phasing, default: 2")
-	Max := flag.Int("MaxKCount", -1, "Maximum genome-wide count of kmers used in phasing, default: Ploidy")
-	BuscoTable := flag.String("BUSCOFullTable", "", "BUSCO full_table.tsv file for the unphased fasta")
+	K := flag.Int("K", 31, "(non-BUSCO modes only) Kmer length, default 31")
+	S := flag.Int("S", 11, "(non-BUSCO modes only) Syncmer S, default 11")
+	T := flag.Int("T", 1, "(non-BUSCO modes only) Syncmer T, default 1")
+	Ploidy := flag.Int("Ploidy", 0, "Ploidy, or number of bins you want to partition your genome into")
+	Min := flag.Int("Min", 2, "(non-BUSCO modes only) Minimum genome-wide count of markers used in phasing, default: 2")
+	Max := flag.Int("Max", -1, "(non-BUSCO modes only) Maximum genome-wide count of markers used in phasing, default: Ploidy")
+	BuscoTable := flag.String("BuscoFullTable", "", "BUSCO full_table.tsv file for the unphased fasta")
+	ThresholdString := flag.String("DuplicationThresholds", "1,10,20,30,40,50", "Starting thresholds to test, please provide as comma-separated list, e.g.: 1,2,3")
+	NumOfWorkers := flag.Int("cores", -1, "Number of cores you want the programme to use, default is all available")
+	NumToSubsample := flag.Int("R", -1, "(non-BUSCO modes only) Number of markers to subsample when building the graph, default is to use all markers available")
 	flag.Parse()
 
-	// Check required flags
-	if *FastaPath == "" || *TabexPath == "" || *FaiPath == "" || *K == 0 || *BinCount == 0 {
-		fmt.Fprintln(os.Stderr, "Error: Required flags -Fasta, -Tabex, -Fai, -K, and -Ploidy must be provided as non-zero/non-empty")
+	if *mode != "syncmers" && *mode != "busco" {
+		fmt.Fprintf(os.Stderr, "ERROR: Please pick a valid mode\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	if *Max < *Min {
-		fmt.Println("MaxKCount must be bigger than or equal to MinKCount")
+	missing := func(name string) {
+		fmt.Fprintf(os.Stderr, "ERROR: -%s is required\n", name)
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *mode == "" {
+		missing("Mode")
+	}
+	if *FastaPath == ""  && *mode == "syncmers"{
+		missing("Fasta")
+	}
+	if *FaiPath == "" {
+		missing("Fai")
+	}
+	if *Ploidy == 0 {
+		missing("Ploidy")
+	}
+	if *BuscoTable == "" {
+		missing("BuscoFullTable")
+	}
+
+	cores := *NumOfWorkers
+	if cores <= 0 {
+		cores = runtime.NumCPU()
+	}
+	maxKCount := *Max
+	if maxKCount < 0 {
+		maxKCount = *Ploidy
+	}
+
+	var thresholds []float32
+	for _, tok := range strings.Split(*ThresholdString, ",") {
+		if strings.TrimSpace(tok) == "" {
+			continue
+		}
+		val, err := strconv.ParseFloat(strings.TrimSpace(tok), 32)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: cannot parse threshold %q: %v\n", tok, err)
+			os.Exit(1)
+		}
+		thresholds = append(thresholds, float32(val))
+	}
+	if len(thresholds) == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: no valid thresholds supplied with -DuplicationThresholds")
 		os.Exit(1)
 	}
 
-	// If MaxKCount wasn't provided, default to Ploidy
-	if *Max == -1 {
-		*Max = *BinCount
+
+	if *mode == "syncmers" {
+		fmt.Printf("\nLaunching SyncmerMode on %s with %d cores …\n", *FastaPath, cores)
+		SyncmerMode(
+			*FastaPath,  // FastaFilePath
+			*K,          // K
+			*S,          // S
+			*T,          // T
+			*FaiPath,    // FaiPath
+			*BuscoTable, // BUSCOFullTable
+			*Ploidy,     // NumberOfBins
+			thresholds,  // Thresholds
+			*Min,        // MinKCount
+			maxKCount,   // MaxKCount
+			cores,       // cores
+			*NumToSubsample,
+		)
 	}
 
-	Thresholds := []float32{5, 10, 15}
-
-	KmerMode(*FastaPath, *TabexPath, *K, *FaiPath, *BuscoTable, *BinCount, Thresholds, *Min, *Max)
-
+	if *mode == "busco" {
+		fmt.Printf("\nLaunching BUSCOmode on %s with %d cores …\n", *FastaPath, cores)
+		BUSCOMode(
+			*FaiPath,    // FaiPath
+			*BuscoTable, // BUSCOFullTable
+			*Ploidy,     // NumberOfBins
+			thresholds,  // Thresholds
+			cores,       // cores
+		)
+	}
 }
