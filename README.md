@@ -51,8 +51,35 @@ Usage of ../GraphGerbil2:
 
 ### Some testing results
 
+1. Allolobophora molleri
 
-1. Carpinus betulus
+Syncmer mode on whApoMoll1 (tetraploid), with expected haploid genome size of ~1.5 Gb and ~15% BUSCO duplication. See: https://tolqc.cog.sanger.ac.uk/erga-bge/annelids/Allolobophora_molleri/
+
+```
+Launching SyncmerMode on whApoMoll1.fasta with 40 cores …
+Time elapsed to process Samtools fai file: 367.898974ms
+Time elapsed to process BUSCO files: 23.795449ms
+12317 sequences in total, 2123 of those have BUSCOs on them 
+Time elapsed to generate Syncmers for the whole genome: 1m23.920314735s
+Time elapsed to generate SyncmerMap from SyncmerList: 4m38.505476365s
+Time elapsed to filter syncmers: 30.782940684s
+Time elapsed to generate SyncmerSequenceMap from Filtered SyncmerMap: 25.900719175s
+12255 sequences in total are represented by 45376734 valid syncmers 
+Time elapsed to sample 500000 syncmers: 4.937459436s
+11631 sequences in total are represented by sampled syncmers 
+Time elapsed to build graph: 1.463998041s
+---------------------------------------------------
+Threshold  Bin   Seqs  Span       C(%)   S(%)   D(%)  
+---------------------------------------------------
+5.0        1     6752  1534456242 72.67  54.05  18.62 
+5.0        2     3012  1573600945 74.87  49.65  25.23 
+5.0        3     1414  1420118945 70.37  53.75  16.62 
+5.0        4     434   872478889  43.84  39.94  3.90  
+Unassigned       19    77994862   3.00   2.90   0.10  
+---------------------------------------------------
+```
+
+2. Carpinus betulus
 
 Syncmer mode on dhCarBetu1 (Octoploid), with expected haploid genome size of ~400 Mb and ~30% BUSCO duplication. See: https://tolqc.cog.sanger.ac.uk/darwin/dicots/Carpinus_betulus/
 
@@ -83,12 +110,3 @@ Threshold  Bin   Seqs  Span       C(%)   S(%)   D(%)
 Unassigned       4     51626333   12.58  12.49  0.09
 ---------------------------------------------------
 ```
-
-2. Allolobophora molleri
-
-Syncmer mode on whApoMoll1 (tetraploid), with expected haploid genome size of ~1.5 Gb and ~15% BUSCO duplication. See: https://tolqc.cog.sanger.ac.uk/erga-bge/annelids/Allolobophora_molleri/
-
-```
-
-```
-
