@@ -10,11 +10,16 @@ import (
 	"strings"
 )
 
-func ReadFaiFile(FaiPath string, SequenceHashMap map[string]uint64) map[uint64]uint64 {
+func ReadFaiFile(FaiPath string) (map[uint64]uint64, map[string]uint64) {
 	// Returns:
-	// SequenceLengthMap [SequenceName as uint64 from the BUSCO-based Hash Map]Length as uint64
+	// 1. SequenceLengthMap [SequenceName as uint64 from the BUSCO-based Hash Map]Length as uint64
+	// 2. SequenceHashMap map[string]uint64
 
 	SequenceLengthMap := make(map[uint64]uint64)
+
+	// Track sequences for hashing purposes
+	var SequenceCount uint64 = 0
+	SequenceHashMap := make(map[string]uint64)
 
 	File, err := os.Open(FaiPath)
 	if err != nil {
@@ -36,10 +41,15 @@ func ReadFaiFile(FaiPath string, SequenceHashMap map[string]uint64) map[uint64]u
 		if err != nil {
 			panic(err)
 		}
-		SequenceID := SequenceHashMap[Fields[0]]
+		SequenceID, ok := SequenceHashMap[Fields[0]]
+		if !ok {
+			SequenceCount++
+			SequenceID = SequenceCount
+			SequenceHashMap[Fields[0]] = SequenceID
+		}
 		SequenceLengthMap[SequenceID] = uint64(i)
 	}
-	return SequenceLengthMap
+	return SequenceLengthMap, SequenceHashMap
 }
 
 func SortSequencesBySize(SequenceLengthMap map[uint64]uint64) []uint64 {
