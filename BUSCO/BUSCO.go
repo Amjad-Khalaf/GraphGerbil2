@@ -9,16 +9,12 @@ import (
 	"strings"
 )
 
-func ReadBUSCOFullTable(BUSCOFullTable string) (map[uint64]Sequence.Sequence, map[string]uint64, map[string]uint64, map[uint64][]uint64) {
+func ReadBUSCOFullTable(BUSCOFullTable string, SequenceHashMap map[string]uint64) (map[uint64]Sequence.Sequence, map[string]uint64, map[uint64][]uint64, int) {
 	// Returns:
 	// 1. SequenceMap [SequenceName as uint64]SequenceStruct
-	// 2. SequenceHashMap [SequenceName as string]uint64
-	// 3. BUSCOHashMap [BUSCOName as string]uint64
-	// 4. BUSCOMap [BUSCOName as uint64][Sequences with BUSCO as uint64]
-
-	// Track sequences for hashing purposes
-	var SequenceCount uint64 = 0
-	SequenceHashMap := make(map[string]uint64)
+	// 2. BUSCOHashMap [BUSCOName as string]uint64
+	// 3. BUSCOMap [BUSCOName as uint64][Sequences with BUSCO as uint64]
+	// 4. TotalBUSCONum possible as int
 
 	// Track BUSCOs for hashing purposes
 	var BUSCOCount uint64 = 0
@@ -29,6 +25,9 @@ func ReadBUSCOFullTable(BUSCOFullTable string) (map[uint64]Sequence.Sequence, ma
 
 	// BUSCO Map
 	BUSCOMap := make(map[uint64][]uint64)
+
+	// Missing BUSCO Count
+	MissingBUSCOs := 0
 
 	File, err := os.Open(BUSCOFullTable)
 	if err != nil {
@@ -48,12 +47,7 @@ func ReadBUSCOFullTable(BUSCOFullTable string) (map[uint64]Sequence.Sequence, ma
 		Fields := strings.Split(Line, "\t")
 		if !strings.Contains(Fields[0], "#") {
 			if Fields[1] != "Missing" {
-				SequenceID, ok := SequenceHashMap[Fields[2]]
-				if !ok {
-					SequenceCount++
-					SequenceID = SequenceCount
-					SequenceHashMap[Fields[2]] = SequenceID
-				}
+				SequenceID := SequenceHashMap[Fields[2]]
 				info := SequenceMap[SequenceID]
 				BUSCOID, ok := BUSCOHashMap[Fields[0]]
 				if !ok {
@@ -69,8 +63,10 @@ func ReadBUSCOFullTable(BUSCOFullTable string) (map[uint64]Sequence.Sequence, ma
 
 				// Add information to BUSCO Map
 				BUSCOMap[BUSCOID] = append(BUSCOMap[BUSCOID], SequenceID)
+			} else {
+				MissingBUSCOs++
 			}
 		}
 	}
-	return SequenceMap, SequenceHashMap, BUSCOHashMap, BUSCOMap
+	return SequenceMap, BUSCOHashMap, BUSCOMap, (MissingBUSCOs + len(BUSCOMap))
 }
