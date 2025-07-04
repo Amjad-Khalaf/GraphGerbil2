@@ -5,6 +5,8 @@ import (
 	"GraphGerbil2/Sequence"
 	"slices"
 	"sort"
+	"math"
+	"sync"
 )
 
 type Edge struct {
@@ -326,4 +328,206 @@ func PartitionGraph(BufferGraph map[uint64]map[uint64]int, Graph map[uint64][]Ed
 		}
 	}
 	return GenomeAssemblyBins, FinalUnassignedSequences
+}
+
+func PartitionGraphInParallel(
+	BufferGraph map[uint64]map[uint64]int,         // (unused here; kept for API stability)
+	Graph map[uint64][]Edge,
+	SequenceMap map[uint64]Sequence.Sequence,
+	SequenceList []uint64,
+	BinNum int,
+	RelativeDuplicationThreshold float32,
+	TotalMarkerNum int,
+	SequenceLengthMap map[uint64]uint64,
+) ([]GenomeAssemblyBin, []uint64) {
+
+	const minParallelCandidates = 4 // don’t incur goroutine overhead for tiny sets
+
+	Assigned := make(map[uint64]bool)
+	var GenomeAssemblyBins []GenomeAssemblyBin
+
+	for BinIndex := 0; BinIndex < BinNum; BinIndex++ {
+
+		// 1. gather unassigned sequences -------------------------------------
+		var Unassigned []uint64
+		for _, seq := range SequenceList {
+			if !Assigned[seq] {
+				Unassigned = append(Unassigned, seq)
+			}
+		}
+		if len(Unassigned) == 0 {
+			break
+		}
+
+		// 2. seed the bin with the most‑connected sequence --------------------
+		sorted := SortSequencesSubsetbyConnectedness(Graph, Unassigned)
+		seed := sorted[0]
+
+		binSeqs   := []uint64{seed}
+		binMarks  := slices.Clone(SequenceMap[seed].Markers) // defensive copy
+		Assigned[seed] = true
+
+		// 3. marker accounting -------------------------------------------------
+		markCounts := make(map[uint64]int, len(binMarks))
+		for _, m := range binMarks {
+			markCounts[m]++
+		}
+
+		singleCopy, duplicated := 0, 0
+		for _, c := range markCounts {
+			if c == 1 {
+				singleCopy++
+			} else if c > 1 {
+				duplicated++
+			}
+		}
+
+		// 4. fill the bin ------------------------------------------------------
+		candidates := sorted[1:]
+
+		for len(candidates) > 0 {
+
+			bestCand      := uint64(0)       // 0 => none found
+			bestNewDup    := math.MaxInt
+			bestCandIndex := -1
+
+			// -------- parallel candidate evaluation --------------------------
+			if len(candidates) >= minParallelCandidates {
+				type candEval struct {
+					id            uint64
+					newDup        int
+					newDupPercent float32
+					index         int
+				}
+
+				results := make(chan candEval, len(candidates))
+				var wg sync.WaitGroup
+
+				// immutable snapshots for goroutines
+				snapCounts   := markCounts
+				curDup       := duplicated
+				curSingle    := singleCopy
+
+				for idx, cand := range candidates {
+					if Assigned[cand] { // should not happen, but cheap guard
+						continue
+					}
+					wg.Add(1)
+					go func(i int, c uint64) {
+						defer wg.Done()
+
+						newDup := 0
+						for _, m := range SequenceMap[c].Markers {
+							if snapCounts[m] == 1 {
+								newDup++ // will flip single→dup
+							}
+						}
+
+						newDuplicated := curDup + newDup
+						newTotal := curSingle + curDup +
+							len(SequenceMap[c].Markers) - newDup
+						dupPct := float32(newDuplicated) / float32(newTotal) * 100
+
+						results <- candEval{c, newDup, dupPct, i}
+					}(idx, cand)
+				}
+
+				wg.Wait()
+				close(results)
+
+				for r := range results {
+					if r.newDupPercent > RelativeDuplicationThreshold {
+						continue
+					}
+					if r.newDup < bestNewDup ||
+						(r.newDup == bestNewDup && r.index < bestCandIndex) {
+						bestCand, bestNewDup, bestCandIndex =
+							r.id, r.newDup, r.index
+					}
+				}
+			}
+
+			// -------- fallback: tiny candidate set, serial scan --------------
+			if bestCand == 0 { // either we didn’t parallelise or none passed
+				for idx, cand := range candidates {
+					if Assigned[cand] {
+						continue
+					}
+
+					newDup := 0
+					for _, m := range SequenceMap[cand].Markers {
+						if markCounts[m] == 1 {
+							newDup++
+						}
+					}
+
+					newDuplicated := duplicated + newDup
+					newTotal := singleCopy + duplicated +
+						len(SequenceMap[cand].Markers) - newDup
+					dupPct := float32(newDuplicated) / float32(newTotal) * 100
+					if dupPct > RelativeDuplicationThreshold {
+						continue
+					}
+
+					if newDup < bestNewDup ||
+						(newDup == bestNewDup && (bestCandIndex == -1 || idx < bestCandIndex)) {
+						bestCand, bestNewDup, bestCandIndex =
+							cand, newDup, idx
+					}
+				}
+			}
+
+			// no candidate satisfies the threshold → finish this bin ----------
+			if bestCand == 0 {
+				break
+			}
+
+			// -------- mutate state with the chosen candidate -----------------
+			binSeqs = append(binSeqs, bestCand)
+			Assigned[bestCand] = true
+
+			for _, m := range SequenceMap[bestCand].Markers {
+				switch markCounts[m] {
+				case 0:
+					singleCopy++
+				case 1:
+					singleCopy--
+					duplicated++
+				}
+				markCounts[m]++
+			}
+
+			// remove from candidate list without extra alloc
+			candidates = append(candidates[:bestCandIndex],
+				candidates[bestCandIndex+1:]...)
+		}
+
+		// 5. build bin object --------------------------------------------------
+		var allMarkers []uint64
+		for m, c := range markCounts {
+			for i := 0; i < c; i++ {
+				allMarkers = append(allMarkers, m)
+			}
+		}
+
+		score := Sequence.ScoreMarkers(allMarkers, TotalMarkerNum)
+
+		GenomeAssemblyBins = append(GenomeAssemblyBins, GenomeAssemblyBin{
+			Sequences:      binSeqs,
+			NumofSequences: len(binSeqs),
+			AssemblySpan:   Fai.MeasureAssemblySpan(binSeqs, SequenceLengthMap),
+			Markers:        allMarkers,
+			Score:          score,
+		})
+	}
+
+	// 6. collect any sequences that never fit into a bin ----------------------
+	var unassigned []uint64
+	for _, seq := range SequenceList {
+		if !Assigned[seq] {
+			unassigned = append(unassigned, seq)
+		}
+	}
+
+	return GenomeAssemblyBins, unassigned
 }
