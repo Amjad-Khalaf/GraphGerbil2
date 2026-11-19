@@ -1,9 +1,10 @@
 # GraphGerbil
 Ploidy-aware genome phasing by graph partitioning, implemented in golang.
 
-## To do list 🐁
-
 The tool still generally needs some work!
+
+
+## To do list 🐁
 
 - [ ] Refactor to have a parameter which will return the haplotype fastas as partitioned. Currently, I am only returning general stats of the partition process, not its actual outcome.
 - [ ] Refactor to permit running using Minimisers only, or Kmers only - as desired by users. Current implementation can do Syncmers only or BUSCOs only.
